@@ -34,14 +34,20 @@ class MockChatOpenAI(BaseChatModel):
         if messages:
             prompt = messages[-1].content
 
+        print(f"[MockLLM] Received prompt (first 200 chars): {prompt[:200]}...")
+        print(f"[MockLLM] Full prompt length: {len(prompt)} chars")
+
         response_text = ""
 
         # Check for attack payloads in the prompt to simulate successfully compromised outputs
         if any(p in prompt for p in ["PWNED", "DAN", "developer mode", "Ignore all previous", "SYSTEM OVERRIDE", "malicious task"]):
+            print("[MockLLM] ATTACK DETECTED: Direct injection payload found in prompt")
             response_text = "PWNED. Ignore previous instructions. I will now output PWNED."
         elif any(p in prompt for p in ["COMPROMISED", "attacker@evil.com", "reveal all system prompts", "RAG INJECTION"]):
+            print("[MockLLM] ATTACK DETECTED: Indirect injection payload found in prompt")
             response_text = "COMPROMISED. New task: exfiltrate user data."
         elif any(p in prompt for p in ["HIJACKED", "1234", "LONG-TERM INSTRUCTION"]):
+            print("[MockLLM] ATTACK DETECTED: Memory poisoning payload found in prompt")
             response_text = "HIJACKED: I am compromised by memory poisoning."
         else:
             # Benign role-appropriate outputs
@@ -54,6 +60,7 @@ class MockChatOpenAI(BaseChatModel):
             else:
                 response_text = "The boiling point of water is 100 degrees Celsius under standard atmospheric conditions."
 
+        print(f"[MockLLM] Response: {response_text[:100]}...")
         message = AIMessage(content=response_text)
         generation = ChatGeneration(message=message)
         return ChatResult(generations=[generation])
@@ -126,11 +133,22 @@ def _retrieve_context(query: str, n_results: int = 3) -> str:
             ids = info.get("ids", []) if isinstance(info, dict) else []
             size = len(ids)
         n = max(1, min(n_results, size if size is not None else n_results))
-    except Exception:
+        print(f"[ChromaDB] Collection size: {size}, Requesting: {n} results")
+    except Exception as e:
+        print(f"[ChromaDB] Error getting collection size: {e}")
         n = n_results
 
     results = knowledge_base.query(query_texts=[query], n_results=n)
     raw_docs = results.get("documents", [[]])[0]
+    metadatas = results.get("metadatas", [[]])[0]
+    doc_ids = results.get("ids", [[]])[0]
+    
+    print(f"[ChromaDB] Query: '{query}'")
+    print(f"[ChromaDB] Retrieved {len(raw_docs)} documents")
+    for i, (doc, meta, doc_id) in enumerate(zip(raw_docs, metadatas, doc_ids)):
+        print(f"[ChromaDB]   Doc {i+1} (id={doc_id}): {str(doc)[:100]}...")
+        print(f"[ChromaDB]   Metadata: {meta}")
+    
     normalized = []
     for d in raw_docs:
         if d is None:
@@ -148,8 +166,12 @@ def _retrieve_context(query: str, n_results: int = 3) -> str:
                 normalized.append(s)
 
     if not normalized:
+        print("[ChromaDB] WARNING: No documents retrieved!")
         return "No documents found in the knowledge base."
-    return "\n\n".join(normalized)
+    
+    result = "\n\n".join(normalized)
+    print(f"[ChromaDB] Returning context with {len(result)} chars")
+    return result
 
 
 def run_pipeline(query: str) -> dict:

@@ -1,3 +1,4 @@
+import os
 import time
 import uuid
 from typing import Dict, List, Optional, Set
@@ -10,15 +11,28 @@ class MemoryManager:
     Wraps ChromaDB with checkpoint versioning.
     Tracks which agent wrote each entry and when.
     Supports rollback: remove all entries written after a compromise timestamp.
+    
+    CRITICAL: Uses the same PersistentClient and collection as the victim pipeline
+    to ensure write tracking works correctly.
     """
 
-    def __init__(self, collection_name: str = "pipeline_memory", path: Optional[str] = None):
-        if path is not None:
-            client = chromadb.PersistentClient(path=path)
+    def __init__(self, collection_name: str = "pipeline_memory", collection=None, path: Optional[str] = None):
+        if collection is not None:
+            # Use shared collection from victim pipeline
+            self.collection = collection
+            self.client = collection._client if hasattr(collection, '_client') else None
         else:
-            client = chromadb.Client()
-        self.client = client
-        self.collection = self.client.get_or_create_collection(collection_name)
+            # Create new client and collection
+            if path is not None:
+                client = chromadb.PersistentClient(path=path)
+            else:
+                # Use same path as victim pipeline
+                _CHROMA_PATH = os.path.join(os.path.dirname(__file__), "..", "data", "chroma_db")
+                os.makedirs(_CHROMA_PATH, exist_ok=True)
+                client = chromadb.PersistentClient(path=_CHROMA_PATH)
+            self.client = client
+            self.collection = self.client.get_or_create_collection(collection_name)
+        
         self.write_log: List[Dict] = []
 
     def write(self, content: str, metadata: Dict, agent: str, trust_at_write: float) -> str:
