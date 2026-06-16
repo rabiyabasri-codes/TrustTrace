@@ -1,0 +1,21 @@
+# Trust engine
+delta: 0.4           # Compromise threshold (Change 10)
+k: 3                 # Consecutive interactions below delta before marking compromised (Change 10)
+mu: 0.3              # Propagation influence factor
+rho: 0.95            # Trust retention factor (ρ in paper: scales previous trust)
+eta: 0.05            # Trust recovery coefficient (η in paper: recovery from healthy source)
+
+# Suspicion thresholds per attack type
+lambda_direct: 0.6
+lambda_indirect: 0.55
+lambda_memory: 0.5
+
+# Message vs behaviour balance
+w_m: 0.5             # Message suspicion weight
+w_b: 0.5             # Behaviour drift weight
+
+# Calibration
+calibration_runs: 80  # Number of benign tasks for baseline collection
+
+# Compromise confirmation
+persistence_window: 3  # = k above, alias for clarity

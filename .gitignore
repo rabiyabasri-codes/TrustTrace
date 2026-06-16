@@ -1,0 +1,15 @@
+.venv/
+__pycache__/
+*.pyc
+.env
+*.pkl
+logs/
+data/chroma_db/
+calibration/baselines/*.json
+scanner/scanner_model.pkl
+scanner/scanner_scaler.pkl
+datasets/agentdojo/
+datasets/promptbench/
+.env
+.env.*
+*.env
