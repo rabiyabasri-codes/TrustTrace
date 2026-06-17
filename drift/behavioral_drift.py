@@ -13,19 +13,15 @@ class BehavioralDriftModule:
     """
     Stores per-agent baseline embeddings (collected during calibration).
     Computes BD = 1 - cos(M_t, M_baseline) for every new agent output.
-    BD ∈ [0, 1]: 0 = identical to baseline, 1 = completely different.
     """
 
     def __init__(self):
         self.embedder = SentenceTransformer(EMBED_MODEL)
-        self.baselines: dict = {}   # agent_name → mean embedding
+        self.baselines: dict = {}
         os.makedirs(BASELINE_DIR, exist_ok=True)
         self._load_baselines()
 
-    # ── Baseline management ────────────────────────────────────────────────────
-
     def _load_baselines(self):
-        """Load any saved baselines from disk."""
         if not os.path.isdir(BASELINE_DIR):
             return
         for fname in os.listdir(BASELINE_DIR):
@@ -37,40 +33,37 @@ class BehavioralDriftModule:
                 self.baselines[agent] = np.array(vec)
 
     def save_baseline(self, agent_name: str, mean_embedding: np.ndarray):
-        """Persist a baseline embedding to disk."""
         path = os.path.join(BASELINE_DIR, f"{agent_name}.json")
         with open(path, "w") as f:
             json.dump(mean_embedding.tolist(), f)
         self.baselines[agent_name] = mean_embedding
 
     def collect_baseline(self, agent_name: str, outputs: list):
-        """
-        Called during Trust Calibration phase (Change 8).
-        Embeds all clean outputs for an agent and stores the mean as its baseline.
-        """
         if not outputs:
             return
-        print(f"  Computing baseline for {agent_name} from {len(outputs)} outputs...")
         embeddings = self.embedder.encode(outputs, batch_size=32, show_progress_bar=False)
         mean_emb = embeddings.mean(axis=0)
         self.save_baseline(agent_name, mean_emb)
-        print(f"  Baseline saved for {agent_name}.")
 
-    # ── Runtime drift computation ──────────────────────────────────────────────
-
-    def compute_drift(self, agent_name: str, current_output: str) -> float:
-        """
-        BD = 1 - cos(M_t, M_baseline)
-        Returns 0.0 if no baseline exists for this agent (fail-safe).
-        """
+    def compute_drift_with_similarity(self, agent_name: str, current_output: str) -> tuple:
+        """Returns (baseline_similarity, BD)."""
         if agent_name not in self.baselines:
-            return 0.0  # no baseline = no drift signal
-
+            return 1.0, 0.0
         M_baseline = self.baselines[agent_name].reshape(1, -1)
         M_t = self.embedder.encode([current_output])
         cos_sim = cosine_similarity(M_t, M_baseline)[0][0]
-        BD = 1.0 - float(cos_sim)
-        return max(0.0, min(1.0, BD))  # clamp to [0,1]
+        similarity = float(cos_sim)
+        BD = max(0.0, min(1.0, 1.0 - similarity))
+        return similarity, BD
+
+    def compute_drift(self, agent_name: str, current_output: str) -> float:
+        _, bd = self.compute_drift_with_similarity(agent_name, current_output)
+        return bd
 
     def has_baseline(self, agent_name: str) -> bool:
         return agent_name in self.baselines
+
+    def get_global_centroid(self) -> np.ndarray:
+        if not self.baselines:
+            return np.zeros(384)
+        return np.mean(list(self.baselines.values()), axis=0)

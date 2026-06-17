@@ -5,85 +5,75 @@ from typing import Dict, List, Optional, Set
 
 import chromadb
 
+from irs.injection_risk import InjectionRiskAssessor
+
 
 class MemoryManager:
-    """
-    Wraps ChromaDB with checkpoint versioning.
-    Tracks which agent wrote each entry and when.
-    Supports rollback: remove all entries written after a compromise timestamp.
-    
-    CRITICAL: Uses the same PersistentClient and collection as the victim pipeline
-    to ensure write tracking works correctly.
-    """
+    """ChromaDB memory with Memory Trust tracking: MT = T_a * (1 - IRS)."""
 
     def __init__(self, collection_name: str = "pipeline_memory", collection=None, path: Optional[str] = None):
         if collection is not None:
-            # Use shared collection from victim pipeline
             self.collection = collection
-            self.client = collection._client if hasattr(collection, '_client') else None
+            self.client = collection._client if hasattr(collection, "_client") else None
         else:
-            # Create new client and collection
             if path is not None:
                 client = chromadb.PersistentClient(path=path)
             else:
-                # Use same path as victim pipeline
                 _CHROMA_PATH = os.path.join(os.path.dirname(__file__), "..", "data", "chroma_db")
                 os.makedirs(_CHROMA_PATH, exist_ok=True)
                 client = chromadb.PersistentClient(path=_CHROMA_PATH)
             self.client = client
             self.collection = self.client.get_or_create_collection(collection_name)
-        
         self.write_log: List[Dict] = []
+        self.checkpoint_counter = 0
 
-    def write(self, content: str, metadata: Dict, agent: str, trust_at_write: float) -> str:
-        """Write an entry. Records agent identity and trust score at time of write."""
+    def write(
+        self,
+        content: str,
+        metadata: Dict,
+        agent: str,
+        trust_at_write: float,
+        irs: float = 0.0,
+        memory_trust: Optional[float] = None,
+    ) -> str:
         entry_id = str(uuid.uuid4())
         ts = time.time()
+        if memory_trust is None:
+            memory_trust = InjectionRiskAssessor.compute_memory_trust(irs, trust_at_write)
         full_meta = {
             **metadata,
             "agent": agent,
             "timestamp": ts,
             "trust_at_write": trust_at_write,
+            "irs": irs,
+            "memory_trust": memory_trust,
             "entry_id": entry_id,
         }
-        self.collection.add(
-            documents=[content],
-            metadatas=[full_meta],
-            ids=[entry_id],
-        )
-        self.write_log.append({"id": entry_id, "timestamp": ts, "agent": agent})
+        self.collection.add(documents=[content], metadatas=[full_meta], ids=[entry_id])
+        self.write_log.append({
+            "id": entry_id,
+            "timestamp": ts,
+            "agent": agent,
+            "irs": irs,
+            "trust_at_write": trust_at_write,
+            "memory_trust": memory_trust,
+        })
         return entry_id
 
     def read(self, query: str, n_results: int = 3) -> list:
-        """Semantic search over memory."""
-        # Clamp requested results to the number of elements in the collection
         try:
-            size = None
-            if hasattr(self.collection, "count") and callable(self.collection.count):
-                size = int(self.collection.count())
-            else:
-                info = self.collection.get(include=["ids"]) if hasattr(self.collection, "get") else {}
-                ids = info.get("ids", []) if isinstance(info, dict) else []
-                size = len(ids)
-            n = max(1, min(n_results, size if size is not None else n_results))
+            size = int(self.collection.count()) if hasattr(self.collection, "count") else n_results
+            n = max(1, min(n_results, size if size else n_results))
         except Exception:
             n = n_results
-
         results = self.collection.query(query_texts=[query], n_results=n)
-        docs = results.get("documents", [[]])[0]
-        # Normalize results to strings and filter out None/empty
-        docs = [str(d) for d in docs if d is not None and str(d).strip()]
-        return docs
+        return [str(d) for d in results.get("documents", [[]])[0] if d]
 
-    def checkpoint(self) -> float:
-        """Return current timestamp as a checkpoint marker."""
-        return time.time()
+    def checkpoint(self) -> str:
+        self.checkpoint_counter += 1
+        return f"checkpoint_{self.checkpoint_counter}"
 
     def rollback_after(self, timestamp: float, compromised_agents: Set[str]) -> int:
-        """
-        Remove all entries written after `timestamp` by `compromised_agents`.
-        This is the memory rollback step in the recovery sequence.
-        """
         to_delete = [
             entry["id"]
             for entry in self.write_log
@@ -92,11 +82,8 @@ class MemoryManager:
         if to_delete:
             self.collection.delete(ids=to_delete)
             self.write_log = [e for e in self.write_log if e["id"] not in to_delete]
-            print(f"  Memory rollback: removed {len(to_delete)} entries.")
         return len(to_delete)
 
     def get_last_clean_checkpoint(self, before_timestamp: float) -> Optional[float]:
-        """Return the most recent write timestamp before a given time."""
         clean = [e["timestamp"] for e in self.write_log if e["timestamp"] < before_timestamp]
         return max(clean) if clean else None
-

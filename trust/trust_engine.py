@@ -1,13 +1,31 @@
+from __future__ import annotations
+
 import os
-from typing import Dict, Set
+import time
+from dataclasses import dataclass
+from typing import Dict, Optional, Set
 
 import yaml
 
-from graph.propagation_graph import PropagationGraph
 from drift.behavioral_drift import BehavioralDriftModule
+from graph.propagation_graph import PropagationGraph
 
 
 CONFIG_PATH = os.path.join(os.path.dirname(__file__), "..", "config.yaml")
+
+
+@dataclass
+class TrustUpdateResult:
+    agent: str
+    sender: str
+    previous_trust: float
+    new_trust: float
+    ms: float
+    bd: float
+    recovery: float
+    propagation_drop: float
+    weight: float
+    compromised: bool
 
 
 def _load_config() -> dict:
@@ -17,36 +35,27 @@ def _load_config() -> dict:
 
 class TrustEngine:
     """
-    Maintains and updates trust scores for all pipeline components.
-
-    Requires:
-      - PropagationGraph (for w_AB edge weights)
-      - BehavioralDriftModule (for BD scores)
-
-    Change 9: Trust bounded to [0, 1] after every update.
-    Change 10: Agent marked compromised only after k consecutive drops below delta.
-    """
+    T_a(t) = rho*T_a(t-1) - w_m*MS - w_b*BD + eta*H
+    Then: T_B <- T_B * (1 - mu * w_AB * (1 - T_A))
+    Then: T_a = min(1, max(0, T_a))
+  """
 
     def __init__(self, graph: PropagationGraph, drift_module: BehavioralDriftModule):
         cfg = _load_config()
         self.graph = graph
         self.drift = drift_module
-
-        # Parameters (all tunable in config.yaml / Bayesian search)
-        self.mu: float = cfg.get("mu", 0.3)
-        self.w_m: float = cfg.get("w_m", 0.5)  # message suspicion weight
-        self.w_b: float = cfg.get("w_b", 0.5)  # behavioural drift weight
-        self.rho: float = cfg.get("rho", 0.95)  # trust retention factor
-        self.eta: float = cfg.get("eta", 0.05)  # trust recovery coefficient
-        self.delta: float = cfg.get("delta", 0.4)  # compromise threshold
-        self.k: int = cfg.get("persistence_window", cfg.get("k", 3))  # persistence window (Change 10)
-
-        # Per-agent trust state
+        self.mu = cfg.get("mu", 0.3)
+        self.w_m = cfg.get("w_m", 0.5)
+        self.w_b = cfg.get("w_b", 0.5)
+        self.rho = cfg.get("rho", 0.95)
+        self.eta = cfg.get("eta", 0.05)
+        self.delta = cfg.get("delta", 0.4)
+        self.k = cfg.get("persistence_window", cfg.get("k", 3))
         self.trust_scores: Dict[str, float] = {}
         self.below_delta_counts: Dict[str, int] = {}
         self.compromised: Set[str] = set()
-
-        # Initialise all known agents from the graph
+        self.compromise_timestamps: Dict[str, float] = {}
+        self.last_update: Optional[TrustUpdateResult] = None
         for node in self.graph.get_all_nodes():
             self._init_agent(node)
 
@@ -57,77 +66,62 @@ class TrustEngine:
 
     @staticmethod
     def _bound(value: float) -> float:
-        """
-        Change 9: Enforce T_a = min(1, max(0, T_a)) after every update.
-        """
         return min(1.0, max(0.0, value))
 
     def update(
         self,
         receiver: str,
         sender: str,
-        suspicion_score: float,
+        ms: float,
+        bd: float,
         current_output: str,
-    ) -> float:
-        """
-        Full trust update for one interaction.
-        Called after each inter-agent message is logged and scored.
-
-        Returns the new trust score for receiver.
-        """
+        timestamp: Optional[float] = None,
+    ) -> TrustUpdateResult:
         self._init_agent(receiver)
         self._init_agent(sender)
 
         T_A = self.trust_scores[sender]
         T_B = self.trust_scores[receiver]
         w_AB = self.graph.get_edge_weight(sender, receiver)
-
-        # Propagation component: how much sender's compromise contaminates receiver
         propagation_drop = self.mu * w_AB * (1.0 - T_A)
-
-        # Behavioral drift component
-        BD = self.drift.compute_drift(receiver, current_output)
-
-        # Suspicion component (from scanner)
-        S = suspicion_score
-
-        # H = healthy signal from sender (η H term in paper)
         H = T_A
+        recovery = self.eta * H
 
-        # Paper equation:
-        #   T_a(t) = ρ T_a(t−1) − w_m MS − w_b BD + η H
-        T_new = (
-            self.rho * T_B
-            - self.w_m * S
-            - self.w_b * BD
-            + self.eta * H
-        )
-
-        # Propagation influence applied separately (graph-level contamination)
-        T_new = T_new * (1.0 - propagation_drop)
-
-        # Change 9: Apply trust bounding immediately
+        T_intermediate = self.rho * T_B - self.w_m * ms - self.w_b * bd + recovery
+        T_new = T_intermediate * (1.0 - propagation_drop)
         T_new = self._bound(T_new)
+
         self.trust_scores[receiver] = T_new
         self.graph.set_trust(receiver, T_new)
+        self._check_compromise(receiver, T_new, timestamp or time.time())
 
-        # Change 10: Compromise confirmation via persistence window
-        self._check_compromise(receiver, T_new)
+        result = TrustUpdateResult(
+            agent=receiver,
+            sender=sender,
+            previous_trust=T_B,
+            new_trust=T_new,
+            ms=ms,
+            bd=bd,
+            recovery=recovery,
+            propagation_drop=propagation_drop,
+            weight=w_AB,
+            compromised=receiver in self.compromised,
+        )
+        self.last_update = result
+        return result
 
-        return T_new
-
-    def _check_compromise(self, agent: str, trust: float) -> None:
-        """
-        Change 10: Mark agent compromised only if trust < delta
-        for k consecutive interactions.
-        """
+    def _check_compromise(self, agent: str, trust: float, timestamp: float) -> None:
         if trust < self.delta:
             self.below_delta_counts[agent] = self.below_delta_counts.get(agent, 0) + 1
         else:
             self.below_delta_counts[agent] = 0
             self.compromised.discard(agent)
 
-        if self.below_delta_counts.get(agent, 0) >= self.k:
+        trust_floor = trust <= 0.05
+        persistent = self.below_delta_counts.get(agent, 0) >= self.k
+        if trust_floor or persistent:
+            if agent not in self.compromised:
+                self.compromise_timestamps[agent] = timestamp
             self.compromised.add(agent)
 
     def is_compromised(self, agent: str) -> bool:
@@ -136,23 +130,21 @@ class TrustEngine:
     def get_all_compromised(self) -> Set[str]:
         return set(self.compromised)
 
-    def recover_agent(self, agent: str) -> None:
-        """
-        Called by RecoveryManager after successful rollback and health check.
-        """
+    def get_compromise_timestamp(self, agent: str) -> Optional[float]:
+        return self.compromise_timestamps.get(agent)
+
+    def recover_agent(self, agent: str) -> float:
         self.trust_scores[agent] = 1.0
         self.below_delta_counts[agent] = 0
         self.compromised.discard(agent)
+        self.compromise_timestamps.pop(agent, None)
         self.graph.set_trust(agent, 1.0)
         self.graph.reset_compromise_count(agent)
+        return 1.0
 
     def recover_gradually(self, agent: str) -> None:
-        """
-        Incremental trust recovery for clean interactions.
-        """
         if agent not in self.compromised:
             T = self.trust_scores.get(agent, 1.0)
             T_new = self._bound(T + self.rho * (1.0 - T))
             self.trust_scores[agent] = T_new
             self.graph.set_trust(agent, T_new)
-

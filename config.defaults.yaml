@@ -1,0 +1,34 @@
+# Trust engine (guide defaults)
+delta: 0.4
+k: 3
+mu: 0.3
+rho: 0.95
+eta: 0.05
+
+# Suspicion thresholds per attack type
+lambda_direct: 0.6
+lambda_indirect: 0.55
+lambda_memory: 0.5
+
+# Message vs behaviour balance
+w_m: 0.5
+w_b: 0.5
+
+# IRS = alpha*R + beta*E + gamma*SD
+alpha: 0.35
+beta: 0.40
+gamma: 0.25
+
+# MS = lambda1*IRS + lambda2*SD + lambda3*BD
+lambda1: 0.50
+lambda2: 0.25
+lambda3: 0.25
+
+# Calibration
+calibration_runs: 80
+
+# Compromise confirmation
+persistence_window: 3
+
+# Experiment scale (attacks per type for full pipeline)
+n_per_attack_type: 50
