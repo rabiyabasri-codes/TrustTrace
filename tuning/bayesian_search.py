@@ -6,6 +6,7 @@ Optuna TPE, 70/30 split, tunes trust-engine parameters.
 from __future__ import annotations
 
 import os
+import logging
 from typing import Callable, List, Optional
 
 import optuna
@@ -59,8 +60,16 @@ def objective(
 
     for scenario, _truth in zip(attack_scenarios, ground_truths):
         batch = batch_factory()
-        result = batch.run_attack_scenario(scenario, enable_recovery=False)
-        collector.record_attack(succeeded=result["succeeded"], detected=result["detected"])
+        try:
+            result = batch.run_attack_scenario(scenario, enable_recovery=False)
+        except Exception as e:
+            logging.error(f"[OptunaFailure] Scenario {scenario} raised exception: {e}")
+            result = None
+        if not result or not isinstance(result, dict) or "succeeded" not in result or "detected" not in result:
+            logging.warning(f"[OptunaFailure] Invalid or missing result for scenario {scenario}: {result}")
+            collector.record_attack(succeeded=False, detected=False)
+        else:
+            collector.record_attack(succeeded=result["succeeded"], detected=result["detected"])
 
     metrics = collector.compute()
     return metrics["Detection_Rate"] - metrics["FPR"]

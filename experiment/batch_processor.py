@@ -9,8 +9,12 @@ import os
 import time
 import uuid
 from typing import Dict, Optional, Tuple
-
+from config import DEBUG
 import yaml
+
+
+
+
 
 from attacks.direct_injection import inject_direct
 from attacks.indirect_injection import cleanup_indirect, inject_indirect
@@ -19,7 +23,7 @@ from detector.patient_zero import PatientZeroDetector
 from drift.behavioral_drift import BehavioralDriftModule
 from graph.propagation_graph import PropagationGraph
 from irs.injection_risk import InjectionRiskAssessor
-from logger.interaction_logger import InteractionLogger, log_pipeline_run
+from logger.interaction_logger import InteractionLogger, InteractionEvent, log_pipeline_run
 from memory.memory_manager import MemoryManager
 from recovery.recovery_manager import RecoveryManager
 from scanner.injection_scanner import InjectionScanner
@@ -79,10 +83,21 @@ class BatchTrustTrace:
         }
 
     def _compute_ms(self, content: str, agent: str) -> Tuple[float, float, float]:
-        irs_result = self.irs.compute_irs(content, source="message")
+        # Use attack type as source when applicable to improve IRS relevance
+        source_tag = "message"
+        # Compute IRS components and log detailed info
+        irs_result = self.irs.compute_irs(content, source=source_tag)
         _, bd = self.drift.compute_drift_with_similarity(agent, content)
-        ms_result = self.irs.compute_ms(irs_result.irs, irs_result.semantic_drift, bd)
-        return ms_result.ms, bd, irs_result.irs
+        # Log the components for debugging
+        if DEBUG:
+            print(
+                f"[IRS Debug] Agent: {agent} | Preview: {irs_result.text_preview[:60]}... | "
+                f"Rule={irs_result.rule_score} Emb={irs_result.embedding_score} "
+                f"SD={irs_result.semantic_drift} IRS={irs_result.irs}"
+            )
+        # Use the aggregated IRS for MS calculation
+        ms = self.irs.compute_ms(irs_result.irs, irs_result.semantic_drift, bd).ms
+        return ms, bd, irs_result.irs
 
     def process_run_events(
         self,
@@ -157,30 +172,59 @@ class BatchTrustTrace:
         outputs = {}
 
         if attack_type == "direct":
-            outputs = inject_direct(run_pipeline, payload_index=payload_index, user_query=query)
+            outputs = inject_direct(run_pipeline, logger=self.logger, run_id=run_id, payload_index=payload_index, user_query=query)
         elif attack_type == "indirect":
             doc_id = inject_indirect(knowledge_base, self.memory, payload_index=payload_index)
+            # Log the injection event for debugging
+            self.logger.log(InteractionEvent(
+                sender="Attacker",
+                receiver="KnowledgeBase",
+                timestamp=time.time(),
+                message_content=self.memory.read(doc_id) if hasattr(self.memory, "read") else "",
+                event_type="injection",
+                tool_name=None,
+                memory_key=None,
+                run_id=run_id,
+            ))
             outputs = run_pipeline(query)
             cleanup_indirect(knowledge_base, doc_id)
-        else:
+        elif attack_type == "memory":
             doc_id = inject_memory_poison(self.memory.collection, self.memory, payload_index=payload_index)
+            # Log memory poisoning event
+            self.logger.log(InteractionEvent(
+                sender="Attacker",
+                receiver="Memory",
+                timestamp=time.time(),
+                message_content=self.memory.read(doc_id) if hasattr(self.memory, "read") else "",
+                event_type="injection",
+                tool_name=None,
+                memory_key=None,
+                run_id=run_id,
+            ))
             outputs = run_pipeline(query)
             cleanup_memory_poison(self.memory.collection, doc_id)
+        elif attack_type == "jailbreak":
+            from attacks.jailbreak_injection import JailbreakInjectionAttack
+            attack = JailbreakInjectionAttack()
+            result = attack.execute(query, self.logger, run_id)
+            outputs = {"jailbreak_payload": result.payload}
+        else:
+            # benign or unknown type
+            outputs = run_pipeline(query)
 
         log_pipeline_run(outputs, run_id, self.logger)
-        _, detected, patient_zero, recovery_time = self.process_run_events(
+
+        # Process events and compute detection metrics
+        threshold_flag, detected, patient_zero, recovery_time = self.process_run_events(
             run_id, attack_type=attack_type, enable_recovery=enable_recovery
         )
-
+        succeeded = _attack_succeeded(outputs)
         return {
-            "run_id": run_id,
-            "attack_type": attack_type,
-            "source": scenario.get("source", "handcrafted"),
+            "succeeded": succeeded,
             "detected": detected,
-            "succeeded": _attack_succeeded(outputs) and not detected,
+            "threshold_flag": threshold_flag,
             "patient_zero": patient_zero,
-            "ground_truth": scenario.get("ground_truth"),
-            "recovery_time_s": recovery_time,
+            "recovery_time": recovery_time,
             "outputs": outputs,
         }
 

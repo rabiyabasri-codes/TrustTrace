@@ -2,11 +2,13 @@ import json
 import os
 import sqlite3
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from typing import Optional
+from datetime import datetime
+from enum import Enum
+from config import DEBUG  # central debug flag
 
 DB_PATH = os.path.join(os.path.dirname(__file__), "..", "logs", "interactions.db")
-
 
 @dataclass
 class InteractionEvent:
@@ -19,7 +21,6 @@ class InteractionEvent:
     memory_key: Optional[str] # populated for memory events
     suspicion_score: float = 0.0  # filled in by scanner later
     run_id: str = ""
-
 
 class InteractionLogger:
     """
@@ -51,19 +52,47 @@ class InteractionLogger:
             """)
             conn.commit()
 
+    @staticmethod
+    def serialize_sqlite(value):
+        """Convert unsupported types to SQLite‑compatible representations."""
+        if isinstance(value, (dict, list, set)):
+            return json.dumps(value)
+        if isinstance(value, datetime):
+            return value.isoformat()
+        if isinstance(value, Enum):
+            return str(value.value)
+        if value is None:
+            return None
+        # Preserve basic types; otherwise stringify
+        return value if isinstance(value, (str, int, float, bool)) else str(value)
+
     def log(self, event: InteractionEvent) -> int:
-        """Insert event, return its event_id."""
+        """Insert event, return its event_id. Includes optional debug prints."""
+        raw_params = [
+            event.run_id,
+            event.sender,
+            event.receiver,
+            event.timestamp,
+            event.message_content,
+            event.event_type,
+            event.tool_name,
+            event.memory_key,
+            event.suspicion_score,
+        ]
+        if DEBUG:
+            for i, value in enumerate(raw_params):
+                print(f"[SQL Debug] Param {i}: type={type(value)} value={repr(value)[:200]}")
+        params = [self.serialize_sqlite(v) for v in raw_params]
         with sqlite3.connect(self.db_path) as conn:
-            cur = conn.execute("""
+            cur = conn.execute(
+                """
                 INSERT INTO interactions
                   (run_id, sender, receiver, timestamp, message_content,
                    event_type, tool_name, memory_key, suspicion_score)
                 VALUES (?,?,?,?,?,?,?,?,?)
-            """, (
-                event.run_id, event.sender, event.receiver, event.timestamp,
-                event.message_content, event.event_type,
-                event.tool_name, event.memory_key, event.suspicion_score
-            ))
+                """,
+                params,
+            )
             conn.commit()
             return cur.lastrowid
 
@@ -95,7 +124,6 @@ class InteractionLogger:
             ).fetchall()
         return [dict(r) for r in rows]
 
-
 # ── Wrapper that hooks into the pipeline ───────────────────────────────────────
 
 def log_pipeline_run(pipeline_outputs: dict, run_id: str, logger: InteractionLogger):
@@ -106,14 +134,13 @@ def log_pipeline_run(pipeline_outputs: dict, run_id: str, logger: InteractionLog
     """
     agent_order = ["Retriever", "Planner", "Executor", "Generator"]
     ts = time.time()
-
     for i, sender in enumerate(agent_order[:-1]):
         receiver = agent_order[i + 1]
         content = pipeline_outputs.get(sender, "")
         event = InteractionEvent(
             sender=sender,
             receiver=receiver,
-            timestamp=ts + i * 0.001,  # slight offset to preserve order
+            timestamp=ts + i * 0.001,
             message_content=content,
             event_type="message",
             tool_name=None,

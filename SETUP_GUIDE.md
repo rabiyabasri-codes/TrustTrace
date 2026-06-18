@@ -110,7 +110,7 @@ Main attack simulation & evaluation
 **Normal:** Project uses mock LLM when key is missing  
 To use real GPT-4o:
 ```powershell
-$env:OPENAI_API_KEY = "sk-your-key-here"
+$env:OPENAI_API_KEY = "YOUR_API_KEY_HERE"
 ```
 
 ---

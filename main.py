@@ -1,15 +1,17 @@
 import os
-import sys
-import time
-
 import yaml
 
+from config import DEBUG  # Import central debug flag
+import sys
+import time
 sys.path.insert(0, os.path.abspath(os.path.dirname(__file__)))
 
-from calibration.calibrate import run_calibration
+import argparse
+from memory.chroma_recovery import ensure_chroma_integrity
 from detector.patient_zero import PatientZeroDetector
 from drift.behavioral_drift import BehavioralDriftModule
 from eval.metrics import MetricsCollector
+
 from experiment.full_pipeline import run_full_experiment
 from graph.propagation_graph import PropagationGraph
 from logger.interaction_logger import InteractionLogger
@@ -159,27 +161,41 @@ def validation_mode(runtime: TrustTraceRuntime) -> dict:
 
 
 def main():
-    args = sys.argv[1:]
-    quick = "--quick" in args
-    force_cal = "--recalibrate" in args
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--mode', choices=['interactive', 'batch'], default='interactive', help='Select execution mode')
+    parser.add_argument('--quick', action='store_true', help='Run quick experiment')
+    parser.add_argument('--recalibrate', action='store_true', help='Force recalibration')
+    parser.add_argument('--restore-config', action='store_true', help='Restore default config')
+    parser.add_argument('--experiment', action='store_true', help='Run full experiment')
+    parser.add_argument('--validate', action='store_true', help='Run validation suite')
+    args = parser.parse_args()
+    # If script invoked without any command-line arguments, prompt the user to select mode
+    if len(sys.argv) == 1:
+        print("\nSelect execution mode:\n  1) Interactive\n  2) Batch (full experiment)\n  3) Validation Suite")
+        choice = input("Enter choice [1-3]: ").strip()
+        if choice == "2":
+            args.mode = "batch"
+        elif choice == "3":
+            args.validate = True
+        else:
+            args.mode = "interactive"
 
-    if "--restore-config" in args:
+    if args.restore_config:
         restore_config_defaults()
         return
 
-    cfg = _load_config()
+    # Resolve flag variables for clarity
+    force_cal = args.recalibrate
+    quick = args.quick
 
-    if "--experiment" in args:
-        run_full_experiment(quick=quick, force_calibrate=force_cal)
-        return
-
-    runtime = bootstrap_system(cfg, force_calibrate=force_cal)
-
-    if "--validate" in args:
+    if args.validate:
+        runtime = bootstrap_system(_load_config(), force_cal)
         validation_mode(runtime)
-        return
-
-    interactive_mode(runtime)
+    elif args.mode == "batch" or args.experiment:
+        run_full_experiment(quick=quick, force_calibrate=force_cal)
+    else:
+        runtime = bootstrap_system(_load_config(), force_cal)
+        interactive_mode(runtime)
 
 
 if __name__ == "__main__":

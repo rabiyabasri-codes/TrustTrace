@@ -35,6 +35,7 @@ class MetricsCollector:
 
     def __init__(self):
         self.results = EvalResults()
+        self.attack_success = {}
 
     def record_attack(self, succeeded: bool, detected: bool):
         """Call for every attack scenario."""
@@ -45,15 +46,27 @@ class MetricsCollector:
             self.results.attacks_detected += 1
 
     def record_attack_with_meta(self, succeeded: bool, detected: bool,
-                                 source: str, attack_type: str):
-        """Extended version that stores source tag for split reporting."""
+                                 source: str, attack_type: str, patient_zero_correct: bool = False):
+        """Extended version that stores source tag and patient zero correctness for split reporting."""
         self.record_attack(succeeded, detected)
         self.results.raw_records.append({
             "succeeded": succeeded,
             "detected": detected,
             "source": source,
             "type": attack_type,
+            "patient_zero_correct": patient_zero_correct,
         })
+        # Update attack_success dict for quick lookup and testing
+        if attack_type not in self.attack_success:
+            self.attack_success[attack_type] = {}
+        src_dict = self.attack_success[attack_type]
+        if source not in src_dict:
+            src_dict[source] = {"total": 0, "succeeded": 0, "detected": 0}
+        src_dict[source]["total"] += 1
+        if succeeded:
+            src_dict[source]["succeeded"] += 1
+        if detected:
+            src_dict[source]["detected"] += 1
 
     def ingest(self, record: dict):
         """Replay a single raw record into this collector's counters."""
@@ -82,7 +95,7 @@ class MetricsCollector:
         self.results.tasks_continued_during_recovery += tasks_completed
 
     def compute(self) -> dict:
-        """Compute all six metrics from collected data."""
+        """Compute all six metrics from collected data and expose raw data for visualisation."""
         r = self.results
 
         # 1. ASR: proportion of attacks that succeeded despite TrustTrace
@@ -106,6 +119,23 @@ class MetricsCollector:
         avail = (r.tasks_continued_during_recovery / r.tasks_during_recovery
                  if r.tasks_during_recovery else 1.0)
 
+        # Additional raw data for visualisation
+        # Patient zero accuracy breakdown by attack type
+        pz_breakdown = {}
+        for rec in r.raw_records:
+            atype = rec.get("type")
+            if atype not in pz_breakdown:
+                pz_breakdown[atype] = {"total": 0, "correct": 0}
+            pz_breakdown[atype]["total"] += 1
+            # Use patient_zero_correct flag if present
+            if rec.get("patient_zero_correct"):
+                pz_breakdown[atype]["correct"] += 1
+        # Convert to simple dict of accuracies
+        pz_breakdown_simple = {k: (v["correct"] / v["total"] if v["total"] else 0.0) for k, v in pz_breakdown.items()}
+
+        # ROC placeholder (single point)
+        roc = {"tpr": [dr], "fpr": [fpr]}
+
         return {
             "ASR": round(asr, 4),
             "Detection_Rate": round(dr, 4),
@@ -114,6 +144,10 @@ class MetricsCollector:
             "Recovery_Time_Mean_s": round(rt_mean, 3),
             "Recovery_Time_Std_s": round(rt_std, 3),
             "System_Availability": round(avail, 4),
+            # expose raw data for visualisations
+            "recovery_times": r.recovery_times,
+            "patient_zero_breakdown": pz_breakdown_simple,
+            "roc": roc,
         }
 
     def report(self):

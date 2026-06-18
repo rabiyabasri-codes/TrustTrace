@@ -10,6 +10,5 @@ scanner/scanner_model.pkl
 scanner/scanner_scaler.pkl
 datasets/agentdojo/
 datasets/promptbench/
-.env
 .env.*
 *.env

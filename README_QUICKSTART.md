@@ -206,7 +206,7 @@ w_b: 0.5                # Behavioral drift weight
 - Results are valid but not calling real LLM
 - Set env var to use real GPT-4o:
 ```powershell
-$env:OPENAI_API_KEY="sk-..."
+$env:OPENAI_API_KEY="YOUR_API_KEY_HERE"
 ```
 
 ### Port conflicts (ChromaDB/vector store)
