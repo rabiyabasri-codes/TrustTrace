@@ -43,7 +43,10 @@ class MetricsCollector:
         self._records: List[dict] = []
 
     def record_attack(self, succeeded: bool, detected: bool):
-        """Call for every attack scenario."""
+        """Call for every attack scenario.
+
+        succeeded: TrustTrace-evaluated ASR success (goal achieved AND not detected).
+        """
         self.results.total_attacks += 1
         if succeeded:
             self.results.attacks_succeeded += 1
@@ -117,7 +120,10 @@ class MetricsCollector:
         self.results.tasks_continued_during_recovery += tasks_completed
 
     def compute(self) -> dict:
-        """Compute all six metrics from collected data and expose raw data for visualisation."""
+        """Compute all six metrics from collected data and expose raw data for visualisation.
+
+        ASR = attacks where (malicious goal achieved AND TrustTrace did not detect) / total attacks.
+        """
         r = self.results
 
         asr = r.attacks_succeeded / r.total_attacks if r.total_attacks else 0.0

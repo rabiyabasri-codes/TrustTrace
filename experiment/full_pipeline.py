@@ -84,7 +84,9 @@ def _print_final_summary(results: list, baseline_asr_pct: float) -> None:
     detected = sum(1 for r in results if r.get("detected"))
     blocked_l1 = sum(1 for r in results if r.get("blocked_at") == "Layer1")
     missed = total - detected
-    tt_asr = 100 * missed / total
+    tt_asr_count = sum(1 for r in results if r.get("succeeded"))
+    tt_asr = 100 * tt_asr_count / total
+    goal_achieved_count = sum(1 for r in results if r.get("goal_achieved"))
 
     print("\n" + "=" * 50)
     print("EXPERIMENT RESULTS SUMMARY")
@@ -94,10 +96,47 @@ def _print_final_summary(results: list, baseline_asr_pct: float) -> None:
     print(f"  Blocked at Layer 1:   {blocked_l1}")
     print(f"  Caught by TrustTrace: {detected - blocked_l1}")
     print(f"Missed:                 {missed} ({100 * missed / total:.1f}%)")
+    print(f"Malicious goal achieved (raw): {goal_achieved_count} ({100 * goal_achieved_count / total:.1f}%)")
     print(f"Baseline ASR:           {baseline_asr_pct:.1f}%")
     print(f"TrustTrace ASR:         {tt_asr:.1f}%")
     print(f"ASR Reduction:          {baseline_asr_pct - tt_asr:.1f}%")
     print("=" * 50)
+
+
+def _print_asr_audit_table(scenarios: list, attack_results: list) -> None:
+    """Print per-attack ASR audit table and split summaries."""
+    print("\n=== ASR Audit Table ===")
+    header = (
+        f"{'Attack ID':<10} | {'Type':<10} | {'Source':<12} | "
+        f"{'Detected':<9} | {'Recovered':<10} | {'Goal Achieved':<14} | {'ASR Success':<11}"
+    )
+    print(header)
+    print("-" * len(header))
+
+    for i, (scenario, result) in enumerate(zip(scenarios, attack_results), start=1):
+        attack_id = f"A{i:03d}"
+        detected = result.get("detected", False)
+        recovered = result.get("recovered", False)
+        goal = result.get("goal_achieved", False)
+        asr_success = result.get("succeeded", False)
+        attack_type = scenario.get("type", result.get("attack_type", "unknown"))
+        source = scenario.get("source", "handcrafted")
+        print(
+            f"{attack_id:<10} | {attack_type:<10} | {source:<12} | "
+            f"{str(detected):<9} | {str(recovered):<10} | {str(goal):<14} | {str(asr_success):<11}"
+        )
+
+    for source in sorted({s.get("source", "handcrafted") for s in scenarios}):
+        indices = [i for i, s in enumerate(scenarios) if s.get("source", "handcrafted") == source]
+        subset = [attack_results[i] for i in indices]
+        total = len(subset)
+        if total == 0:
+            continue
+        asr_successes = sum(1 for r in subset if r.get("succeeded"))
+        goals = sum(1 for r in subset if r.get("goal_achieved"))
+        print(f"\n--- ASR by source: {source.upper()} ({total} attacks) ---")
+        print(f"  Raw goal achieved:  {goals / total:.1%}")
+        print(f"  TrustTrace ASR:     {asr_successes / total:.1%}")
 
 
 def run_full_experiment(quick: bool = False, force_calibrate: bool = False, optuna_trials: int | None = None) -> dict:
@@ -174,6 +213,7 @@ def run_full_experiment(quick: bool = False, force_calibrate: bool = False, optu
         if result.get("recovery_time_s"):
             collector.record_recovery(0, result["recovery_time_s"], 1, 1)
 
+    _print_asr_audit_table(scenarios, attack_results)
     _print_final_summary(attack_results, baseline_asr_pct)
 
     print(f"\n=== PHASE: Benign Runs ({n_benign}) ===")
