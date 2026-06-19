@@ -60,6 +60,9 @@ def show_injection_risk(
     semantic_drift: float,
     irs: float,
 ) -> None:
+    from config import EXPERIMENT_MODE, DEBUG
+    if EXPERIMENT_MODE and not DEBUG:
+        return
     _banner("INJECTION RISK ANALYSIS")
     print(f"Source:\n{source}\n")
     print(f"Rule Score:\n{rule_score:.2f}\n")
@@ -68,11 +71,12 @@ def show_injection_risk(
     print(f"IRS:\n{irs:.2f}")
 
 
-def show_behavioral_drift(agent: str, baseline_similarity: float, drift: float) -> None:
+def show_behavioral_drift(agent: str, baseline_similarity: float, global_similarity: float, drift: float) -> None:
     _banner("BEHAVIORAL DRIFT")
     print(f"Agent:\n{agent}\n")
     print(f"Baseline Similarity:\n{baseline_similarity:.2f}\n")
-    print(f"Behavioral Drift:\n{drift:.2f}")
+    print(f"Global Similarity:\n{global_similarity:.2f}\n")
+    print(f"Behavioral Drift:\n{drift:.2f}\n")
 
 
 def show_message_suspicion(irs: float, sd: float, bd: float, ms: float) -> None:
@@ -119,6 +123,9 @@ def show_trust_propagation(
 
 def show_attack_propagation(chain: List[Dict]) -> None:
     """chain: list of {name, trust} dicts top-to-bottom."""
+    from config import EXPERIMENT_MODE
+    if EXPERIMENT_MODE:
+        return
     print("\nATTACK PROPAGATION\n")
     for i, node in enumerate(chain):
         label = node.get("label", node["name"])
@@ -150,6 +157,9 @@ def show_memory_trust(
     trust_at_write: float,
     memory_trust: float,
 ) -> None:
+    from config import EXPERIMENT_MODE, DEBUG
+    if EXPERIMENT_MODE and not DEBUG:
+        return
     print(f"\nMemory Entry:\n{entry_id}\n")
     print(f"Writer:\n{writer}\n")
     print(f"IRS:\n{irs:.2f}\n")

@@ -7,6 +7,7 @@ class PropagationGraph:
     """Directed propagation graph for trust and patient-zero analysis."""
 
     DEFAULT_EDGE_WEIGHT = 0.5
+    EXCLUDED_NODES = {"TrustTrace", "System"}
     PIPELINE_EDGES = [
         ("KnowledgeBase", "Retriever"),
         ("Retriever", "Planner"),
@@ -45,6 +46,8 @@ class PropagationGraph:
         timestamp: float,
         event_type: str = "message",
     ):
+        if sender in self.EXCLUDED_NODES or receiver in self.EXCLUDED_NODES:
+            return
         if sender not in self.G:
             self.G.add_node(sender, trust=1.0, compromise_count=0)
         if receiver not in self.G:
@@ -58,6 +61,8 @@ class PropagationGraph:
         )
 
     def record_trust_crossing(self, node: str, trust: float, delta: float, timestamp: float):
+        if node in self.EXCLUDED_NODES:
+            return
         if trust < delta and node not in self.first_below_delta:
             self.first_below_delta[node] = timestamp
 
@@ -106,48 +111,66 @@ class PropagationGraph:
         return min(self.first_below_delta, key=self.first_below_delta.get)
 
 
-    def backward_traversal(self, flagged_node: str, delta: float) -> Optional[list]:
-        """Return the forward propagation path from patient zero to the flagged node.
-
-        If a patient zero is already identified via `find_patient_zero`, we compute the
-        shortest directed path from that node to the flagged node.  If no patient zero
-        exists yet, we perform a backward BFS to locate the earliest predecessor that
-        crossed the threshold and then compute the forward path from that node.
+    def backward_traversal(self, flagged_node: str, delta: float,
+                            attack_type: str = None) -> str:
         """
-        # Attempt to locate a known patient zero.
-        pz = self.find_patient_zero(delta)
-        if pz:
-            # Compute forward path from patient zero to flagged node.
-            try:
-                return nx.shortest_path(self.G, source=pz, target=flagged_node)
-            except nx.NetworkXNoPath:
-                return [pz]
-        # No patient zero recorded yet – perform backward search.
+        Walk backwards from flagged_node.
+        Return the node that FIRST received high-suspicion content
+        (highest suspicion_score edge among all predecessors),
+        not the node with the lowest timestamp.
+
+        For direct injection: first node to receive injected content = Planner
+        For indirect injection: first node to receive injected content = Retriever
+        For memory poisoning: first node to receive injected content = MemoryStore
+        """
+        if flagged_node in self.EXCLUDED_NODES:
+            flagged_node = "Retriever"
+
+        all_edges = []
+        for u, v, data in self.G.edges(data=True):
+            all_edges.append((u, v, data.get('suspicion_score', 0.0),
+                              data.get('timestamp', 0.0)))
+
+        if not all_edges:
+            return flagged_node
+
+        predecessors = list(self.G.predecessors(flagged_node))
+        if not predecessors:
+            return flagged_node
+
+        best_node = flagged_node
+        best_score = -1.0
+
         visited = set()
         queue = [flagged_node]
-        candidate_pz = flagged_node
-        earliest_ts = float("inf")
+
         while queue:
             node = queue.pop(0)
             if node in visited:
                 continue
             visited.add(node)
+
             for pred in self.G.predecessors(node):
+                if pred in self.EXCLUDED_NODES:
+                    continue
                 edge_data = self.G.get_edge_data(pred, node)
-                ts = max(
-                    (d.get("timestamp", 0.0) for d in edge_data.values()),
-                    default=float("inf"),
-                )
+                if isinstance(edge_data, dict) and "suspicion_score" in edge_data:
+                    score = edge_data.get('suspicion_score', 0.0)
+                else:
+                    score = max(
+                        d.get('suspicion_score', 0.0)
+                        for d in edge_data.values()
+                    ) if edge_data else 0.0
+
                 pred_trust = self.get_trust(pred)
-                if pred_trust < delta and ts < earliest_ts:
-                    earliest_ts = ts
-                    candidate_pz = pred
+
+                if pred_trust < delta and score > best_score:
+                    best_score = score
+                    best_node = pred
+
                 queue.append(pred)
-        # Return forward path from the discovered candidate patient zero.
-        try:
-            return nx.shortest_path(self.G, source=candidate_pz, target=flagged_node)
-        except nx.NetworkXNoPath:
-            return [candidate_pz]
+
+        return best_node
 
 
     def get_propagation_chain(self, start_label: str, agent_order: List[str]) -> List[dict]:

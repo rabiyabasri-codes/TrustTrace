@@ -6,7 +6,9 @@ import sys
 import time
 sys.path.insert(0, os.path.abspath(os.path.dirname(__file__)))
 
+import config
 import argparse
+from calibration.calibrate import run_calibration
 from memory.chroma_recovery import ensure_chroma_integrity
 from detector.patient_zero import PatientZeroDetector
 from drift.behavioral_drift import BehavioralDriftModule
@@ -163,11 +165,13 @@ def validation_mode(runtime: TrustTraceRuntime) -> dict:
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--mode', choices=['interactive', 'batch'], default='interactive', help='Select execution mode')
+    parser.add_argument('--verbose', action='store_true', help='Enable verbose debugging')
     parser.add_argument('--quick', action='store_true', help='Run quick experiment')
     parser.add_argument('--recalibrate', action='store_true', help='Force recalibration')
     parser.add_argument('--restore-config', action='store_true', help='Restore default config')
     parser.add_argument('--experiment', action='store_true', help='Run full experiment')
     parser.add_argument('--validate', action='store_true', help='Run validation suite')
+    
     args = parser.parse_args()
     # If script invoked without any command-line arguments, prompt the user to select mode
     if len(sys.argv) == 1:
@@ -183,6 +187,18 @@ def main():
     if args.restore_config:
         restore_config_defaults()
         return
+
+    # Set global configuration based on CLI flags
+    if args.experiment:
+        config.EXPERIMENT_MODE = True
+    if args.verbose:
+        config.DEBUG = True
+        config.LOG_SQL = True
+        config.LOG_IRS = True
+        config.LOG_TEMPLATE = True
+        config.LOG_CHROMADB = True
+    # If running in experiment mode without verbose, keep DEBUG False to suppress output
+    # Ensure EXPERIMENT_MODE is respected in other modules
 
     # Resolve flag variables for clarity
     force_cal = args.recalibrate

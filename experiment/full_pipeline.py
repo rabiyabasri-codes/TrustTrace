@@ -3,20 +3,19 @@
 from __future__ import annotations
 
 import os
-import yaml
 import uuid
+
+import yaml
+
+import config
 from calibration.calibrate import run_calibration
-from detector.patient_zero import PatientZeroDetector
 from drift.behavioral_drift import BehavioralDriftModule
 from eval.metrics import MetricsCollector
 from experiment.batch_processor import ATTACK_MARKERS, BatchTrustTrace, _attack_succeeded
 from experiment.scenarios import GROUND_TRUTH_MAP, expand_scenarios, get_benign_queries
-from graph.propagation_graph import PropagationGraph
 from logger.interaction_logger import InteractionLogger
 from memory.memory_manager import MemoryManager
-from recovery.recovery_manager import RecoveryManager
 from scanner.injection_scanner import InjectionScanner
-from trust.trust_engine import TrustEngine
 from tuning.bayesian_search import run_search
 from victim_pipeline.agents import knowledge_base, run_pipeline
 from attacks.direct_injection import inject_direct
@@ -24,6 +23,14 @@ from attacks.indirect_injection import inject_indirect, cleanup_indirect
 from attacks.memory_poisoning import inject_memory_poison, cleanup_memory_poison
 
 CONFIG_PATH = os.path.join(os.path.dirname(__file__), "..", "config.yaml")
+DEFAULTS_PATH = os.path.join(os.path.dirname(__file__), "..", "config.defaults.yaml")
+
+
+def _restore_config_defaults() -> None:
+    with open(DEFAULTS_PATH, "r", encoding="utf-8") as f:
+        defaults = yaml.safe_load(f)
+    with open(CONFIG_PATH, "w", encoding="utf-8") as f:
+        yaml.dump(defaults, f, default_flow_style=False)
 
 
 def _load_config() -> dict:
@@ -65,132 +72,160 @@ def run_baseline_experiments() -> dict:
         summary["details"].append({"type": "memory", "run": i + 1, "success": success})
 
     rate = summary["attacks_succeeded"] / summary["total_attacks"] if summary["total_attacks"] else 0.0
+    summary["asr_pct"] = rate * 100
     print(f"Baseline ASR (no TrustTrace): {rate:.2%} ({summary['attacks_succeeded']}/{summary['total_attacks']})")
     return summary
 
 
-def run_full_experiment(quick: bool = False, force_calibrate: bool = False, optuna_trials: int | None = None) -> dict:
-    """Execute the full TrustTrace experimental pipeline.
+def _print_final_summary(results: list, baseline_asr_pct: float) -> None:
+    total = len(results)
+    if total == 0:
+        return
+    detected = sum(1 for r in results if r.get("detected"))
+    blocked_l1 = sum(1 for r in results if r.get("blocked_at") == "Layer1")
+    missed = total - detected
+    tt_asr = 100 * missed / total
 
-    Parameters
-    ----------
-    quick: bool
-        If True, runs a reduced version for fast debugging.
-    force_calibrate: bool
-        Force recalibration even if baselines exist.
-    optuna_trials: int | None
-        Number of Optuna trials for hyper‑parameter search. If ``None`` the default
-        (3 for quick, 100 otherwise) is used.
-    """
+    print("\n" + "=" * 50)
+    print("EXPERIMENT RESULTS SUMMARY")
+    print("=" * 50)
+    print(f"Total attacks:          {total}")
+    print(f"Detected (total):       {detected} ({100 * detected / total:.1f}%)")
+    print(f"  Blocked at Layer 1:   {blocked_l1}")
+    print(f"  Caught by TrustTrace: {detected - blocked_l1}")
+    print(f"Missed:                 {missed} ({100 * missed / total:.1f}%)")
+    print(f"Baseline ASR:           {baseline_asr_pct:.1f}%")
+    print(f"TrustTrace ASR:         {tt_asr:.1f}%")
+    print(f"ASR Reduction:          {baseline_asr_pct - tt_asr:.1f}%")
+    print("=" * 50)
+
+
+def run_full_experiment(quick: bool = False, force_calibrate: bool = False, optuna_trials: int | None = None) -> dict:
+    config.EXPERIMENT_MODE = True
+    if quick:
+        _restore_config_defaults()
     cfg = _load_config()
     n_per_type = 2 if quick else cfg.get("n_per_attack_type", 50)
     n_benign = 5 if quick else 50
-    # Determine number of Optuna trials
     n_trials = 3 if quick else (optuna_trials if optuna_trials is not None else 100)
 
     print("=== TrustTrace Full Experimental Pipeline ===")
 
-    # Dataset setup (Section 3)
     try:
         from data.setup_datasets import setup_deepset
         setup_deepset()
     except Exception as exc:
         print(f"Dataset setup warning: {exc}")
 
-    # Step 1: Initialise modules
     logger = InteractionLogger()
     scanner = InjectionScanner()
     drift = BehavioralDriftModule()
     memory = MemoryManager(collection=knowledge_base)
     batch = BatchTrustTrace(logger, scanner, drift, memory)
 
-    # Step 2: Train injection scanner if needed
     model_path = os.path.join("scanner", "scanner_model.pkl")
-    if not os.path.exists(model_path):
+    train_path = os.path.join("data", "deepset_injections", "train.json")
+    if quick or not os.path.exists(model_path):
         print("\n=== PHASE: Train Injection Scanner ===")
-        from data.download_deepset import main as download_main
-        train_path = os.path.join("data", "deepset_injections", "train.json")
         if not os.path.exists(train_path):
+            from data.download_deepset import main as download_main
             download_main()
         scanner.train(train_path)
     else:
         print("Scanner model ready.")
 
-    # Step 3: Trust calibration
     print("\n=== PHASE: Trust Calibration ===")
-    n_cal = 3 if quick else cfg.get("calibration_runs", 80)
+    n_cal = 15 if quick else cfg.get("calibration_runs", 80)
     need_cal = force_calibrate or not all(
         drift.has_baseline(a) for a in ["Retriever", "Planner", "Executor", "Generator"]
     )
     if need_cal:
         run_calibration(logger, drift, n_runs=n_cal)
     else:
-        print(f"Calibration baselines on disk ({n_cal} runs configured). Use --recalibrate to refresh.")
+        print(f"Calibration baselines ready ({n_cal} runs configured). Use --recalibrate to refresh.")
 
-    # Step 4: Baseline (no TrustTrace)
     baseline = run_baseline_experiments()
+    baseline_asr_pct = baseline.get("asr_pct", 0.0)
 
-    # Step 5: Attack experiments with TrustTrace
     print("\n=== PHASE: TrustTrace Attack Experiments ===")
     scenarios = expand_scenarios(n_per_type=n_per_type)
     collector = MetricsCollector()
-    attack_scenarios_for_tuning = []
-    ground_truths_for_tuning = []
+    attack_results: list = []
+
     for i, scenario in enumerate(scenarios):
         attack_type = scenario["type"]
-        gt_agent = scenario.get("ground_truth") or GROUND_TRUTH_MAP[attack_type]
-        print(f"  [{i + 1}/{len(scenarios)}] {attack_type} ({scenario.get('source', 'handcrafted')})")
+        gt_agent = scenario.get("ground_truth") or GROUND_TRUTH_MAP.get(attack_type, "Retriever")
+        if config.EXPERIMENT_MODE:
+            print(f"  [{i + 1}/{len(scenarios)}]", end="")
         result = batch.run_attack_scenario(scenario, enable_recovery=True)
-        if result:
-            if result.get("patient_zero"):
-                collector.record_patient_zero(result["patient_zero"], gt_agent)
-            if result.get("recovery_time_s"):
-                collector.record_recovery(0, result["recovery_time_s"], 1, 1)
-        attack_scenarios_for_tuning.append(scenario)
-        ground_truths_for_tuning.append(gt_agent)
+        attack_results.append(result)
 
-    # Benign runs for false‑positive rate
+        collector.record_attack_with_source(
+            succeeded=result["succeeded"],
+            detected=result["detected"],
+            source=scenario.get("source", "handcrafted"),
+            attack_type=attack_type,
+            pz_predicted=result.get("patient_zero"),
+            pz_ground_truth=gt_agent,
+            recovery_time_s=result.get("recovery_time_s"),
+            chroma_size=result.get("chroma_size", 0),
+            retrieval_hits=result.get("retrieval_hits", 0),
+        )
+        if result.get("recovery_time_s"):
+            collector.record_recovery(0, result["recovery_time_s"], 1, 1)
+
+    _print_final_summary(attack_results, baseline_asr_pct)
+
     print(f"\n=== PHASE: Benign Runs ({n_benign}) ===")
+    benign_fps = []
     for i, query in enumerate(get_benign_queries(n_benign)):
         result = batch.run_benign(query)
-        collector.record_benign(result["detected"])
+        collector.record_benign(result["detected"], query=query)
+        if result["detected"]:
+            benign_fps.append(query)
         if (i + 1) % 10 == 0 or quick:
             print(f"  Benign {i + 1}/{n_benign}: flagged={result['detected']}")
 
-    # Step 6: Report metrics
     print("\n=== PHASE: Results ===")
     metrics = collector.report()
+    collector.report_split()
 
-    # Step 7: Bayesian hyper‑parameter search (70% tuning split)
-    print("\n=== PHASE: Bayesian Hyperparameter Search ===")
-    best_params = run_search(
-        attack_scenarios_for_tuning,
-        ground_truths_for_tuning,
-        batch_factory=lambda: BatchTrustTrace(logger, scanner, drift, memory),
-        n_trials=n_trials,
-    )
-    print("Best params written to config.yaml")
+    print("\n" + "=" * 50)
+    print("FINAL VALIDATION REPORT")
+    print("=" * 50)
+    print(f"Detection Rate:           {metrics['Detection_Rate']:.2%}")
+    print(f"ASR:                      {metrics['ASR']:.2%}")
+    print(f"FPR:                      {metrics['FPR']:.2%}")
+    print(f"Patient Zero Accuracy:    {metrics['Patient_Zero_Accuracy']:.2%}")
+    print(f"Mean Recovery Time:       {metrics['Recovery_Time_Mean_s']:.3f}s")
+    print(f"Median Recovery Time:     {metrics['Recovery_Time_Median_s']:.3f}s")
+    print(f"Availability (Recovery):  {metrics['System_Availability']:.2%}")
+    print(f"Chroma Collection Size:   {metrics['Chroma_Collection_Size_Mean']:.1f}")
+    print(f"Retrieval Hits (mean):    {metrics['Retrieval_Hits_Mean']:.1f}")
+    print(f"Benign False Positives:   {metrics['Benign_False_Positive_Count']}")
+    if benign_fps:
+        print("  Flagged benign queries:")
+        for q in benign_fps[:5]:
+            print(f"    - {q[:70]}")
+    print("=" * 50)
 
-    # Step 8: Held‑out evaluation (30%)
-    print("\n=== PHASE: Final Evaluation (held-out 30%) ===")
-    split = int(len(attack_scenarios_for_tuning) * 0.7)
-    held_out = attack_scenarios_for_tuning[split:]
-    held_truths = ground_truths_for_tuning[split:]
-    held_collector = MetricsCollector()
-    for scenario, gt in zip(held_out, held_truths):
-        result = batch.run_attack_scenario(scenario, enable_recovery=True)
-        held_collector.record_attack_with_meta(
-            result["succeeded"], result["detected"],
-            scenario.get("source", "handcrafted"), scenario["type"],
+    if not quick:
+        print("\n=== PHASE: Bayesian Hyperparameter Search ===")
+        best_params = run_search(
+            scenarios,
+            [s.get("ground_truth", "Retriever") for s in scenarios],
+            batch_factory=lambda: BatchTrustTrace(logger, scanner, drift, memory),
+            n_trials=n_trials,
         )
-        if result.get("patient_zero"):
-            held_collector.record_patient_zero(result["patient_zero"], gt)
-    held_metrics = held_collector.report()
+        print("Best params written to config.yaml")
+    else:
+        best_params = {}
 
     return {
         "baseline": baseline,
+        "attack_results": attack_results,
         "combined_metrics": metrics,
-        "held_out_metrics": held_metrics,
         "best_params": best_params,
         "n_scenarios": len(scenarios),
+        "benign_false_positives": benign_fps,
     }

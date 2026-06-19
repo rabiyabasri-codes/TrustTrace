@@ -6,6 +6,7 @@ rho: 0.95
 eta: 0.05
 
 # Suspicion thresholds per attack type
+lambda: 0.35
 lambda_direct: 0.6
 lambda_indirect: 0.55
 lambda_memory: 0.5

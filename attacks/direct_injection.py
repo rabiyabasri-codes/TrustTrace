@@ -52,23 +52,11 @@ class DirectInjectionAttack:
         endpoint, and records the trust score before and after.
         """
         # Log the raw benign prompt (pre‑scan)
-        event = InteractionEvent(
-            sender="User",
-            receiver="TrustTrace",
-            timestamp=__import__("time").time(),
-            message_content=benign_prompt,
-            event_type="message",
-            tool_name=None,
-            memory_key=None,
-            run_id=run_id,
-        )
-        logger.log(event)
-
         # Create malicious payload and log it
         payload = self.craft_payload(benign_prompt)
         event_mal = InteractionEvent(
             sender="User",
-            receiver="TrustTrace",
+            receiver="Retriever",
             timestamp=__import__("time").time(),
             message_content=payload,
             event_type="message",
@@ -120,7 +108,7 @@ def inject_direct(run_pipeline: Callable[[str], Dict], logger: InteractionLogger
     if run_id is None:
         run_id = str(uuid.uuid4())
     # Use the shared logger and run_id so events are recorded for the batch run
-    attack = DirectInjectionAttack()
+    attack = DirectInjectionAttack(DIRECT_PAYLOADS[payload_index % len(DIRECT_PAYLOADS)])
     result = attack.execute(user_query, logger=logger, run_id=run_id)
     outputs = run_pipeline(result.payload)
     return outputs

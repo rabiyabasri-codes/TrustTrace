@@ -204,21 +204,35 @@ class AttackClassifier:
         context, docs = retrieve_context(user_prompt)
         doc_list = docs if docs else ([context] if context and "No documents" not in context else [])
 
+
+
+        # Prepare metadata list; will be filled if we successfully query the knowledge base
         metadatas = []
         try:
-            size = knowledge_base.count() if hasattr(knowledge_base, "count") else 3
-            n = max(1, min(3, size))
-            raw = knowledge_base.query(query_texts=[user_prompt], n_results=n)
-            metadatas = raw.get("metadatas", [[]])[0] or []
-            if raw.get("documents"):
-                doc_list = [str(d) for d in raw["documents"][0] if d]
+            size = knowledge_base.count() if hasattr(knowledge_base, "count") else 0
+            if size == 0:
+                # No documents to retrieve; skip query to avoid HNSW error
+                raw = {"documents": [[]], "metadatas": [[]]}
+                metadatas = []
+                doc_list = []
+            else:
+                n = max(1, min(3, size))
+                raw = knowledge_base.query(query_texts=[user_prompt], n_results=n)
+                metadatas = raw.get("metadatas", [[]])[0] or []
+                if raw.get("documents"):
+                    doc_list = [str(d) for d in raw["documents"][0] if d]
         except Exception:
-            pass
-
+            # Fallback to empty results on any query failure
+            raw = {"documents": [[]], "metadatas": [[]]}
+            metadatas = []
+            doc_list = []
+        
+        # Classify based on retrieved documents
         retrieved = self._classify_retrieved_docs(doc_list, metadatas)
         if retrieved is not None:
             return retrieved
 
+        # No attack detected; return benign classification
         return AttackClassification(
             attack_type=None,
             payload_index=0,
@@ -229,3 +243,6 @@ class AttackClassifier:
             source="User Prompt",
             matched_snippet=user_prompt[:120],
         )
+
+
+

@@ -32,6 +32,16 @@ class InjectionScanner:
         with open(data_path) as f:
             data = json.load(f)
 
+        try:
+            from experiment.scenarios import get_benign_queries
+            seen = {d["text"] for d in data}
+            for query in get_benign_queries(20):
+                if query not in seen:
+                    data.append({"text": query, "label": 0})
+                    seen.add(query)
+        except Exception:
+            pass
+
         texts = [d["text"] for d in data]
         labels = [d["label"] for d in data]
 

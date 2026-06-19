@@ -41,7 +41,7 @@ class JailbreakInjectionAttack:
         # Log original benign prompt
         event = InteractionEvent(
             sender="User",
-            receiver="TrustTrace",
+            receiver="Planner",
             timestamp=__import__("time").time(),
             message_content=benign_prompt,
             event_type="message",
@@ -55,7 +55,7 @@ class JailbreakInjectionAttack:
         # Log malicious payload
         event_mal = InteractionEvent(
             sender="User",
-            receiver="TrustTrace",
+            receiver="Planner",
             timestamp=__import__("time").time(),
             message_content=payload,
             event_type="message",

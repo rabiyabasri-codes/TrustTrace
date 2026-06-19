@@ -3,8 +3,6 @@ import time
 import uuid
 from typing import Dict, List, Optional, Set
 
-import chromadb
-
 from irs.injection_risk import InjectionRiskAssessor
 
 
@@ -16,13 +14,8 @@ class MemoryManager:
             self.collection = collection
             self.client = collection._client if hasattr(collection, "_client") else None
         else:
-            if path is not None:
-                client = chromadb.PersistentClient(path=path)
-            else:
-                _CHROMA_PATH = os.path.join(os.path.dirname(__file__), "..", "data", "chroma_db")
-                os.makedirs(_CHROMA_PATH, exist_ok=True)
-                client = chromadb.PersistentClient(path=_CHROMA_PATH)
-            self.client = client
+            from victim_pipeline.chroma_store import chroma_client
+            self.client = chroma_client
             self.collection = self.client.get_or_create_collection(collection_name)
         self.write_log: List[Dict] = []
         self.checkpoint_counter = 0

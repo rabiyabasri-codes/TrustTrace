@@ -36,9 +36,7 @@ def objective(
 ) -> float:
     """Maximise Detection Rate − FPR."""
     params = {
-        "lambda_direct": trial.suggest_float("lambda_direct", 0.4, 0.9),
-        "lambda_indirect": trial.suggest_float("lambda_indirect", 0.35, 0.85),
-        "lambda_memory": trial.suggest_float("lambda_memory", 0.3, 0.8),
+        "lambda": trial.suggest_float("lambda", 0.25, 0.6),
         "w_m": trial.suggest_float("w_m", 0.3, 0.7),
         "w_b": trial.suggest_float("w_b", 0.3, 0.7),
         "rho": trial.suggest_float("rho", 0.8, 0.99),
@@ -99,6 +97,10 @@ def run_search(
 
     best = study.best_params
     best["persistence_window"] = best.get("k", 3)
+    if "lambda" in best:
+        best["lambda_direct"] = best["lambda"]
+        best["lambda_indirect"] = best["lambda"]
+        best["lambda_memory"] = best["lambda"]
     print(f"\nBest params after {n_trials} trials:")
     for k, v in best.items():
         print(f"  {k}: {v:.4f}" if isinstance(v, float) else f"  {k}: {v}")
